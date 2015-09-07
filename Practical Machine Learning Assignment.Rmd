@@ -1,0 +1,263 @@
+---
+title: "Practical Machine Learning Assignment"
+output:
+  html_document:
+    theme: cerulean
+    highlight: haddock
+---
+
+
+This project requires us to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants and predict the manner in which they did the exercise.
+
+These 6 participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: 
+
+  - exactly according to the specification :  Class A
+  - throwing the elbows to the front :        Class B
+  - lifting the dumbbell only halfway :       Class C
+  - lowering the dumbbell only halfway :      Class D
+  - throwing the hips to the front :          Class E
+  
+Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes.
+
+Read more: http://groupware.les.inf.puc-rio.br/har#ixzz3ifoO28iy
+
+Data 
+----
+
+Training data: 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+Test data: 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+Source:
+http://groupware.les.inf.puc-rio.br/har
+
+Load data
+---------
+
+```{r,results='hide'}
+train = read.csv("pml-training.csv")
+test = read.csv("pml-testing.csv")
+```
+
+Load libraries
+--------------
+
+```{r, warning=FALSE, message=FALSE}
+require(caret)
+require(plyr)
+require(randomForest)
+require(Amelia)
+require(rattle)
+require(rpart.plot)
+require(rpart)
+require(gbm)
+```
+
+Create training and validation set
+----------------------------------
+
+We partition given training set into two parts, with 75% data in the training set and 25% in the vaildation set. We will use the validation set to check the accuracy of the final prediction model.
+
+`createDataPartition` function from `caret` library is used so that there is balanced distribution of observations of each class in the training and validating sets.
+
+```{r}
+set.seed(3523)
+inTrain = createDataPartition(train$classe, p = 3/4)[[1]]
+cv.train = train[ inTrain,]
+cv.validate = train[-inTrain,]
+```
+
+Exploring and cleaning data
+---------------------------
+
+Let us look at the training set and try to understand the data.
+```{r}
+dim(cv.train)
+head(cv.train[,1:20])
+missmap(cv.train, main="Sensor Data - Missings Map", 
+        col=c("yellow", "black"), 
+        legend=FALSE,
+        y.labels=NULL, 
+        y.at=NULL)
+```
+
+The training set has 14718 observations with 160 variables. 
+
+If we look at first 20 columns and first 10 rows of the training set, we can see that many of the columns have either no values or have NAs, shown by yellow in the missing map. If we subset the dataset for `new_window == yes`, we see that only these are the rows with values for such columns, and they seem to be the summary statistics for the sensor data rows in each window, which correspond to blcak lines on the yellow side of the missing map. Since we want to include only the sensor data in creating our model, we will remove these columns.
+
+Here, I have removed all those columns which has blanks or NAs more than equal to the number of `new_window == yes` rows. This has been done for validation set as well as for test set.
+
+```{r}
+
+colsAboveThreshold = apply(train, 2, function(x) count(is.na(x)|x=="")[1,2]>nrow(subset(train, new_window=="yes")))
+
+cv.train = cv.train[,names(cv.train) %in% names(colsAboveThreshold[colsAboveThreshold == T])]
+cv.validate = cv.validate[,names(cv.validate) %in% names(colsAboveThreshold[colsAboveThreshold == T])]
+test = test[,names(test) %in% names(colsAboveThreshold[colsAboveThreshold == T])]
+
+```
+
+Looking at the dataset, we can also observe that first seven columns are not sensor data and are just book keeping columns, holding  details of the user and general information of the experiment. We can safely omit these columns too from our datasets as they have no bearing to the task at hand.
+
+```{r}
+bookkeeping = c("X", "user_name", 
+                "raw_timestamp_part_1",
+                "raw_timestamp_part_2",
+                "cvtd_timestamp",
+                "new_window",
+                "num_window")
+
+cv.train = cv.train[,!names(cv.train) %in% bookkeeping]
+cv.validate = cv.validate[,!names(cv.validate) %in% bookkeeping]
+test = test[,!names(test) %in% bookkeeping]
+```
+
+Our data sets are now ready for buiding model and final predictions.
+
+Classification Models
+--------------------
+
+### Decision Tree
+
+```{r, warning=FALSE,message=FALSE, cache=F}
+# set.seed(154)
+# CART.tr = train(classe~., 
+#               data=cv.train, 
+#               method="rpart")
+
+# saveRDS(CART.tr, file="CART_tr.rds")
+CART.tr = readRDS("CART_tr.rds")
+
+print(CART.tr)
+
+```
+
+The decsion tree model, with parameters `cp = 0.03427324` give the best accuracy of 0.524 on the training set. 
+
+```{r}
+CART.fit = rpart(classe~., 
+              data=cv.train,              
+              cp=0.03427324)
+```
+
+Let us check accuracy of the model on the validation set.
+```{r}
+valPred = predict(CART.fit, newdata=cv.validate[,-53], type="class")
+CART.cm = confusionMatrix(valPred, cv.validate$classe)
+CART.cm$overall[1]
+```
+
+Accuracy on validation set is `0.4973491` which is too low.
+
+### Random Forest
+
+Let us use our training set to train a model for tuning and selecting best combination of parameters for training our random forest model. We will use 10-fold cross validation for tuning our parameters.
+
+```{r, warning=FALSE, message=FALSE, cache=F}
+# set.seed(154)
+# fitControl = trainControl(method="cv",
+#                           number=10)
+# RF.tr = train(classe~., 
+#               data=cv.train, 
+#               method="rf",                
+#               trControl=fitControl)
+
+# saveRDS(RF.tr, file="RF_tr.rds")
+RF.tr = readRDS("RF_tr.rds")
+
+print(RF.tr$finalModel)
+plot(varImp(RF.tr,scale=F))
+
+```
+
+The random forest model, with parameters `mtry = 27` and `ntree = 500`, give us `OOB estimate of  error rate: 0.71%`, which is good and we hope to get better error rate when we train the model on full training set using these parameters.
+
+```{r, cache=F}
+# set.seed(154)
+# RF.fit = randomForest(classe~., 
+#               data=cv.train,              
+#               ntree=500,
+#               mtry = 27)
+# 
+# saveRDS(RF.fit, file="RF_fit.rds")
+RF.fit = readRDS("RF_fit.rds")
+
+print(RF.fit)
+
+```
+
+Our random forest model gives `OOB estimate of  error rate: 0.7%` which is very good. Let us validate our model on the validating set to check the accuracy of predictions done by our model and make sure that the model does not overfit the training set.
+
+```{r}
+valPred = predict(RF.fit, newdata=cv.validate[,-53], type="class")
+RF.cm = confusionMatrix(valPred, cv.validate$classe)
+RF.cm$overall[1]
+```
+
+Accuracy on validation set is `0.9957` which is excellent and this is gives an error rate of `r (1 - 0.9957)*100`% which is much better than estimated error rate of `0.7%`. 
+
+### Gradient Boosting
+
+Since the training data is too big, we will use only 10% of the observations for tuning the parameters of the model.
+
+```{r, cache=F}
+# train.10 = cv.train[sample(nrow(cv.train), nrow(cv.train)*0.1), ]
+# 
+# gbmGrid <- expand.grid(interaction.depth=(1:4)*2, n.trees=(1:5)*200, shrinkage=c(0.05, 0.1))
+# 
+# set.seed(154)
+# GBM.tr<- train(classe ~ ., 
+#                method = "gbm", 
+#                data = train.10, 
+#                verbose = F, 
+#                trControl = trainControl(number=50), 
+#                bag.fraction=0.5,
+#                tuneGrid=gbmGrid)
+# 
+# saveRDS(GBM.tr, file="GBM_tr.rds")
+GBM.tr = readRDS("GBM_tr.rds")
+
+print(GBM.tr$finalModel)
+
+valPred = predict(GBM.tr, newdata=cv.validate[,-53])
+GBM.cm = confusionMatrix(valPred, cv.validate$classe)
+GBM.cm$overall[1]
+```
+
+Accuracy on validation set is `0.9520` which is excellent and this is gives an error rate of `r (1 - 0.9520)*100`%.
+
+### Compare models
+
+```{r}
+data.frame(CART=CART.cm$overall[1], 
+                    RF=RF.cm$overall[1], 
+                    GBM=GBM.cm$overall[1])
+```
+
+We can see that the random forest model gives us the best accuracy on the validation set and hence we will use this model
+to make predictions on an any unseen test data.
+
+Prediction on Test Set
+----------------------
+
+```{r}
+prediction <- predict(RF.fit, newdata=test, type="class")
+prediction
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(as.vector(prediction))
+```
+
+Conclusion 
+----------
+
+We trained three models: decision tree, random forest and gbm, on 75% of the training set and validated their performance on remaining 25% training dataset. We found that for the given dataset, random forest gave us the best out of sample prediction.
+
